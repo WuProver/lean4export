@@ -40,6 +40,7 @@ structure State where
   noMDataExprs : HashMap Expr Expr := HashMap.emptyWithCapacity 100000
   exportMData : Bool := false
   exportUnsafe : Bool := false
+  asAxioms : NameHashSet := {}
   /-- Maps the name of an inductive type to a list of names of corresponding recursors.
   This is used to facilitate exporting of related inductives, constructors, and recursors as a unit. -/
   recursorMap : NameMap NameSet := {}
@@ -67,11 +68,22 @@ def initState (env : Environment) (cliOptions : List String := []) : M Unit := d
           fun
           | none => some <| NameSet.empty.insert recVal.name
           | some recNames => some <| recNames.insert recVal.name
+  let asAxioms := cliOptions.filterMap <|
+    fun s ↦
+      s.dropPrefix? "--as-axiom=" |>.map
+        fun s' ↦ (Syntax.decodeNameLit ("`" ++ s'.toString) |>.get!)
+  for c in asAxioms do
+    if (← read).env.find? c |>.isNone then
+      panic! s!"Constant {c} not found in environment."
   modify fun st => { st with
     exportMData  := cliOptions.any  (· == "--export-mdata")
     exportUnsafe := cliOptions.any (· == "--export-unsafe")
+    asAxioms := .ofList asAxioms
     recursorMap
   }
+  for s in cliOptions do
+    if !s.startsWith "--as-axiom=" && s != "--export-mdata" && s !=  "--export-mdata" then
+      panic! s!"unknown option {s}"
 
 /--
 For a given primitive (name, level, expr) to be exported:
@@ -236,19 +248,28 @@ partial def dumpConstant (c : Name) : M Unit := do
   if (declar.isUnsafe && !(← get).exportUnsafe) || (← get).visitedConstants.contains c then
     return
   modify fun st => { st with visitedConstants := st.visitedConstants.insert c }
-  match declar with
-  | .axiomInfo val => do
+  let asAxiom : Bool := (← get).asAxioms.contains c
+  let dumpAxiom (val : Lean.ConstantVal) (isUnsafe := false) := do
     dumpDeps val.type
     dumpObj [
       ("axiom", Json.mkObj [
         ("name", ← dumpName val.name),
         ("levelParams", ← dumpUparams val.levelParams),
         ("type", ← dumpExpr val.type),
-        ("isUnsafe", val.isUnsafe)
+        ("isUnsafe", isUnsafe)
       ])
     ]
+  match declar with
+  | .axiomInfo val => do
+    if asAxiom then IO.eprintln s!"`{c}` itself is an axiom."
+    dumpAxiom val.toConstantVal val.isUnsafe
   | .defnInfo val => do
     dumpDeps val.type
+    if asAxiom then
+      IO.eprintln <| s!"warning: `{c}` is an definition. " ++
+        "Making it an axiom by removing value may break proofs, while still done as you require."
+      dumpAxiom val.toConstantVal
+    else
     dumpDeps val.value
     dumpObj [
       ("def", Json.mkObj [
@@ -260,8 +281,11 @@ partial def dumpConstant (c : Name) : M Unit := do
         ("safety", val.safety.toJson),
         ("all", ← dumpNames val.all)
       ])
-    ]
+  ]
   | .opaqueInfo val => do
+    if asAxiom then
+      dumpAxiom val.toConstantVal val.isUnsafe
+    else
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
@@ -275,6 +299,9 @@ partial def dumpConstant (c : Name) : M Unit := do
       ])
     ]
   | .thmInfo val => do
+    if asAxiom then
+      dumpAxiom val.toConstantVal
+    else
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
@@ -287,6 +314,8 @@ partial def dumpConstant (c : Name) : M Unit := do
       ])
     ]
   | .quotInfo _ =>
+    if asAxiom then
+      panic! s!"`{c}` is a quotInfo so cannot be an axiom."
     -- Always dump full Quot package in the sensible order
     dumpConstant ``Eq
     for c in [`Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind] do
@@ -302,6 +331,8 @@ partial def dumpConstant (c : Name) : M Unit := do
         ])
       ]
   | .inductInfo baseIndVal => do
+    if asAxiom then
+      panic! s!"`{c}` is an induction definition so cannot be an axiom."
     let mut indVals := #[]
     let mut ctorVals := #[]
     let mut recursorNames := NameSet.empty
@@ -391,8 +422,13 @@ partial def dumpConstant (c : Name) : M Unit := do
         ("recs", recursorValsJson.toJson),
       ])
     ]
-  | .ctorInfo val => dumpConstant val.induct
+  | .ctorInfo val =>
+      if asAxiom then
+        panic! s!"`{c}` is a ctorInfo so cannot be an axiom."
+      dumpConstant val.induct
   | .recInfo val =>
+    if asAxiom then
+      panic! s!"`{c}` is a recInfo so cannot be an axiom."
     for indName in val.all do
       dumpConstant indName
 where

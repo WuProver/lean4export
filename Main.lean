@@ -16,3 +16,5 @@ def main (args : List String) : IO Unit := do
     for c in constants do
       modify (fun st => { st with noMDataExprs := {} })
       dumpConstant c
+    for c in (← get).asAxioms.diff (← get).visitedConstants do
+      IO.eprintln s!"warning: {c} isn't visited."
