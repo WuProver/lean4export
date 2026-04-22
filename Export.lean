@@ -41,6 +41,7 @@ structure State where
   exportMData : Bool := false
   exportUnsafe : Bool := false
   asAxioms : NameHashSet := {}
+  allowedAxioms : Option NameHashSet := .none
   /-- Maps the name of an inductive type to a list of names of corresponding recursors.
   This is used to facilitate exporting of related inductives, constructors, and recursors as a unit. -/
   recursorMap : NameMap NameSet := {}
@@ -68,10 +69,10 @@ def initState (env : Environment) (cliOptions : List String := []) : M Unit := d
           fun
           | none => some <| NameSet.empty.insert recVal.name
           | some recNames => some <| recNames.insert recVal.name
-  let asAxioms := cliOptions.filterMap <|
-    fun s ↦
-      s.dropPrefix? "--as-axiom=" |>.map
-        fun s' ↦ (Syntax.decodeNameLit ("`" ++ s'.toString) |>.get!)
+  let asAxioms := cliOptions.filterMap
+    (·.dropPrefix? "--as-axiom=" |>.map fun s' ↦ (Syntax.decodeNameLit ("`" ++ s'.toString) |>.get!))
+  let allowAxioms := cliOptions.filterMap
+    (·.dropPrefix? "--allow-axiom=" |>.map fun s' ↦ (Syntax.decodeNameLit ("`" ++ s'.toString) |>.get!))
   for c in asAxioms do
     if (← read).env.find? c |>.isNone then
       panic! s!"Constant {c} not found in environment."
@@ -79,10 +80,12 @@ def initState (env : Environment) (cliOptions : List String := []) : M Unit := d
     exportMData  := cliOptions.any  (· == "--export-mdata")
     exportUnsafe := cliOptions.any (· == "--export-unsafe")
     asAxioms := .ofList asAxioms
+    allowedAxioms := if allowAxioms.length = 0 then none else some (.ofList allowAxioms)
     recursorMap
   }
   for s in cliOptions do
-    if !s.startsWith "--as-axiom=" && s != "--export-mdata" && s !=  "--export-mdata" then
+    if !s.startsWith "--as-axiom=" && !s.startsWith "--allow-axiom=" && !s.startsWith "--dump-type" &&
+        s != "--export-mdata" && s !=  "--export-mdata" then
       panic! s!"unknown option {s}"
 
 /--
@@ -262,6 +265,9 @@ partial def dumpConstant (c : Name) : M Unit := do
   match declar with
   | .axiomInfo val => do
     if asAxiom then IO.eprintln s!"`{c}` itself is an axiom."
+    if let .some allowedAxioms := (← get).allowedAxioms then
+      if ! allowedAxioms.contains c then
+        panic! s!"unalllowed axiom {c}"
     dumpAxiom val.toConstantVal val.isUnsafe
   | .defnInfo val => do
     dumpDeps val.type
@@ -446,6 +452,21 @@ where
     IO.println <| Json.mkObj fields |>.compress
 
 end
+
+partial def dumpType (c : Name) : M Unit := do
+  let some declar := (← read).env.find? c
+    | panic! s!"Constant {c} not found in environment."
+  if declar.isUnsafe && !(← get).exportUnsafe then panic! s!"Constant {c} is unsafe."
+  let dump (e : Expr) := do
+    dumpConstant.dumpDeps e
+    let num ← dumpExpr e
+    println! num
+  match declar with
+  | .thmInfo val => dump val.type
+  | .defnInfo val => dump val.type
+  | .opaqueInfo val => dump val.type
+  | .inductInfo val => dump val.type
+  | _ => panic! s!"Constant {c} is not a theorem, definition"
 
 def exportMetadata : Json :=
   let leanMeta := Json.mkObj [
