@@ -40,6 +40,8 @@ structure State where
   noMDataExprs : HashMap Expr Expr := HashMap.emptyWithCapacity 100000
   exportMData : Bool := false
   exportUnsafe : Bool := false
+  omitTheorems : Bool := false
+  omitDecls : Bool := false
   asAxioms : NameHashSet := {}
   allowedAxioms : Option NameHashSet := .none
   /-- Maps the name of an inductive type to a list of names of corresponding recursors.
@@ -79,13 +81,16 @@ def initState (env : Environment) (cliOptions : List String := []) : M Unit := d
   modify fun st => { st with
     exportMData  := cliOptions.any  (· == "--export-mdata")
     exportUnsafe := cliOptions.any (· == "--export-unsafe")
+    omitTheorems := cliOptions.any (· == "--omit-theorems")
+    omitDecls := cliOptions.any (· == "--omit-decls")
     asAxioms := .ofList asAxioms
     allowedAxioms := if allowAxioms.length = 0 then none else some (.ofList allowAxioms)
     recursorMap
   }
   for s in cliOptions do
     if !s.startsWith "--as-axiom=" && !s.startsWith "--allow-axiom=" && !s.startsWith "--dump-type" &&
-        s != "--export-mdata" && s !=  "--export-mdata" then
+        s != "--export-mdata" && s != "--omit-theorems" && s != "--omit-decls" &&
+        s !=  "--export-mdata" then
       panic! s!"unknown option {s}"
 
 /--
@@ -164,6 +169,46 @@ def removeMData (e : Expr) : M Expr := do
     pure <| e.updateProj! (← removeMData e2)
   modify (fun st => { st with noMDataExprs := st.noMDataExprs.insert e e' })
   pure e'
+
+def primitives : NameSet := NameSet.ofArray #[
+  ``eagerReduce,
+  ``Quot,
+  ``Quot.mk,
+  ``Quot.lift,
+  ``Quot.ind,
+  ``String,
+  ``String.toByteArray,
+  ``String.toByteArray,
+  ``String.isValidUTF8,
+  ``String.ofList,
+  ``Nat,
+  ``Nat.zero,
+  ``Nat.succ,
+  ``Nat.add,
+  ``Nat.sub,
+  ``Nat.mul,
+  ``Nat.pow,
+  ``Nat.mod,
+  ``Nat.div,
+  ``Nat.beq,
+  ``Nat.ble,
+  ``Nat.gcd,
+  ``Nat.xor,
+  ``Nat.land,
+  ``Nat.lor,
+  ``Nat.shiftLeft,
+  ``Nat.shiftRight,
+  ``Bool.true,
+  ``Bool.false,
+  ``Char,
+  ``Char.ofNat,
+  ``Char.val,
+  ``Char.valid,
+  ``List,
+  ``List.nil,
+  ``List.cons,
+  ``Eq,
+  ``Eq.refl]
 
 mutual
 
@@ -262,6 +307,29 @@ partial def dumpConstant (c : Name) : M Unit := do
         ("isUnsafe", isUnsafe)
       ])
     ]
+  if (← get).omitDecls && !primitives.contains declar.name then
+    match declar with
+    | .quotInfo _ =>
+      if asAxiom then
+        panic! s!"`{c}` is a quotInfo so cannot be an axiom."
+      -- Always dump full Quot package in the sensible order
+      dumpConstant ``Eq
+      for c in [`Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind] do
+        let some (.quotInfo val) := (← read).env.find? c
+          | panic! s!"Constant {c} not found in environment."
+        modify fun st => { st with visitedConstants := st.visitedConstants.insert c }
+        dumpObj [
+          ("quot", .mkObj [
+            ("name", ← dumpName val.name),
+            ("levelParams", ← dumpUparams val.levelParams),
+            ("type", ← dumpExpr val.type),
+            ("kind", val.kind.toJson)
+          ])
+        ]
+    | .opaqueInfo val => do
+      dumpAxiom val.toConstantVal val.isUnsafe
+    | _ => dumpAxiom declar.toConstantVal
+  else
   match declar with
   | .axiomInfo val => do
     if asAxiom then IO.eprintln s!"`{c}` itself is an axiom."
@@ -305,7 +373,7 @@ partial def dumpConstant (c : Name) : M Unit := do
       ])
     ]
   | .thmInfo val => do
-    if asAxiom then
+    if asAxiom || (← get).omitTheorems then
       dumpAxiom val.toConstantVal
     else
     dumpDeps val.type
