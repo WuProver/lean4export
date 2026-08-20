@@ -529,12 +529,7 @@ partial def dumpType (c : Name) : M Unit := do
     dumpConstant.dumpDeps e
     let num ← dumpExpr e
     println! num
-  match declar with
-  | .thmInfo val => dump val.type
-  | .defnInfo val => dump val.type
-  | .opaqueInfo val => dump val.type
-  | .inductInfo val => dump val.type
-  | _ => panic! s!"Constant {c} is not a theorem, definition"
+  dump declar.type
 
 def exportMetadata : Json :=
   let leanMeta := Json.mkObj [
